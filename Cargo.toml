@@ -1,0 +1,12 @@
+[package]
+name = "timeskwire"
+version = "0.1.0"
+authors = ["Stan Drozd <drozdziak1@gmail.com>"]
+
+[dependencies]
+docopt = "0.8"
+env_logger = "*"
+failure = "0.1.1"
+libc = "0.2"
+log = "*"
+
