@@ -1,6 +1,7 @@
 extern crate docopt;
 extern crate env_logger;
 extern crate libc;
+extern crate serde_json;
 
 #[macro_use]
 extern crate log;
@@ -10,12 +11,13 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::unix;
 use std::path::{Path, PathBuf};
 use std::process;
 
 use docopt::Docopt;
+use serde_json::Value;
 
 const USAGE: &'static str = "
 TimeSkwire - a PDF render extension for TimeWarrior.
@@ -55,24 +57,7 @@ fn main() {
 
     if args.get_bool("init") {
         let mut dir = if args.get_bool("<extension_dir>") {
-            let mut custom = PathBuf::from(args.get_str("<extension_dir>"));
-
-            if custom.is_dir() {
-                if custom.is_relative() {
-                    debug!("Custom dir not absolute, appending to current directory...");
-                    let mut current = env::current_dir().unwrap();
-                    current.push(custom);
-                    custom = current;
-                }
-                custom
-            } else {
-                writeln!(
-                    io::stderr(),
-                    "timeskwire: {}: No such file or directory",
-                    custom.to_str().unwrap()
-                ).unwrap();
-                process::exit(libc::EXIT_FAILURE);
-            }
+            PathBuf::from(args.get_str("<extension_dir>"))
         } else {
             let mut default = env::home_dir().unwrap();
             default.push(DEFAULT_EXTENSION_SUBDIR);
@@ -82,7 +67,7 @@ fn main() {
 
         dir.push("timeskwire");
 
-        bootstrap(dir.as_path(), args.get_bool("--force")).unwrap_or_else(|e| {
+        init(dir.as_path(), args.get_bool("--force")).unwrap_or_else(|e| {
             writeln!(
                 io::stderr(),
                 "timeskwire: init: Could not symlink to {:?}: {}",
@@ -95,10 +80,50 @@ fn main() {
         println!("Init OK. Check that your TimeWarrior sees timeskwire with `timew extensions`.");
         process::exit(libc::EXIT_SUCCESS);
     }
+
+    let (config, times) = parse_input(BufReader::new(io::stdin())).unwrap();
+
+    println!(
+        "TimeWarrior version: {}",
+        config
+            .get("temp.version")
+            .unwrap_or(&String::from("unknown"))
+    );
+
+    for item in times {
+        println!("Item: {}", item);
+    }
+}
+
+fn init(extension_dir: &Path, force: bool) -> Result<(), Box<Error>> {
+    if !extension_dir.is_dir() {
+        writeln!(
+            io::stderr(),
+            "timeskwire: {}: No such file or directory",
+            extension_dir.to_str().unwrap()
+        ).unwrap();
+        process::exit(libc::EXIT_FAILURE);
+    };
+
+    let src = env::current_exe()?;
+    let dst = fs::canonicalize(extension_dir)?;
+
+    if dst.exists() && force {
+        debug!("`force` is true, removing target file");
+        fs::remove_file(dst.as_path())?;
+    }
+
+    info!("Bootstrapping {:?} at {:?}", src, dst);
+    unix::fs::symlink(src.as_path(), dst.as_path())?;
+    Ok(())
+}
+fn parse_input<'a, T: Read>(
+    mut input: BufReader<T>,
+) -> Result<(HashMap<String, String>, Vec<Value>), Box<Error>> {
     let sections: Vec<String> = {
         let mut input_buf = String::new();
 
-        io::stdin().read_to_string(&mut input_buf).unwrap();
+        input.read_to_string(&mut input_buf).unwrap();
         input_buf
             .split("\n\n")
             .map(|section| String::from(section))
@@ -111,21 +136,8 @@ fn main() {
         let entry: Vec<&str> = line.splitn(2, ": ").collect();
         debug!("Got key '{}' with value '{}'.", entry[0], entry[1]);
 
-        config.insert(entry[0], entry[1]);
+        config.insert(String::from(entry[0]), String::from(entry[1]));
     }
 
-    println!("TimeWarrior version: {}", config.get("temp.version").unwrap_or(&"unknown"));
-}
-
-fn bootstrap(dst: &Path, force: bool) -> Result<(), Box<Error>> {
-    let src_buf = env::current_exe()?;
-
-    if dst.exists() && force {
-        debug!("`force` is true, removing target file");
-        fs::remove_file(dst)?;
-    }
-
-    info!("Bootstrapping {:?} at {:?}", src_buf, dst);
-    unix::fs::symlink(src_buf.as_path(), &dst)?;
-    Ok(())
+    Ok((config, serde_json::from_str(&sections[1])?))
 }
