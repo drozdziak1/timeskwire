@@ -11,7 +11,7 @@ extern crate serde_derive;
 
 mod interval;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -21,7 +21,7 @@ use std::os::unix;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use docopt::Docopt;
 use interval::Interval;
 use serde_json::Value;
@@ -97,9 +97,25 @@ fn main() {
             .unwrap_or(&String::from("unknown"))
     );
 
+    let mut overall = Duration::zero();
+
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+
     for item in times {
         println!("Item: {:?}", item);
+
+        starts.push(item.start);
+        ends.push(item.end);
+
+        let mut dur = item.duration();
+
+        overall = overall + dur;
+
+        println!("Took: {}", format_hms(&dur));
     }
+
+    println!("Overall: {}", format_hms(&overall));
 }
 
 fn init(extension_dir: &Path, force: bool) -> Result<(), Box<Error>> {
@@ -158,17 +174,32 @@ fn parse_input<'a, T: Read>(
 
         let tags_raw = value["tags"].as_array().unwrap();
 
-        let mut tags: Vec<String> = Vec::new();
+        let mut tags: HashSet<String> = HashSet::new();
 
         for tag in tags_raw {
-            tags.push(String::from(tag.as_str().unwrap()));
+            tags.insert(String::from(tag.as_str().unwrap()));
         }
 
         let start = Utc.datetime_from_str(start_str, format)?;
         let end = Utc.datetime_from_str(end_str, format)?;
 
-        intervals.push(Interval{ start: start, end: end, tags: tags });
+        intervals.push(Interval {
+            start: start,
+            end: end,
+            tags: tags,
+        });
     }
 
     Ok((config, intervals))
+}
+
+fn format_hms(d: &Duration) -> String {
+    let mut local = d.clone();
+
+    let h = local.num_hours();
+    local = local - Duration::hours(h);
+    let m = local.num_minutes();
+    local = local - Duration::minutes(m);
+    let s = local.num_seconds();
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
