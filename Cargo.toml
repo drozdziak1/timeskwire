@@ -4,9 +4,12 @@ version = "0.1.0"
 authors = ["Stan Drozd <drozdziak1@gmail.com>"]
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 docopt = "0.8"
 env_logger = "*"
 failure = "0.1.1"
 libc = "0.2"
 log = "*"
+serde = "*"
+serde_derive = "*"
 serde_json = "*"

@@ -1,3 +1,4 @@
+extern crate chrono;
 extern crate docopt;
 extern crate env_logger;
 extern crate libc;
@@ -5,6 +6,10 @@ extern crate serde_json;
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate serde_derive;
+
+mod interval;
 
 use std::collections::HashMap;
 use std::env;
@@ -16,7 +21,9 @@ use std::os::unix;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use chrono::{TimeZone, Utc};
 use docopt::Docopt;
+use interval::Interval;
 use serde_json::Value;
 
 const USAGE: &'static str = "
@@ -91,7 +98,7 @@ fn main() {
     );
 
     for item in times {
-        println!("Item: {}", item);
+        println!("Item: {:?}", item);
     }
 }
 
@@ -119,7 +126,7 @@ fn init(extension_dir: &Path, force: bool) -> Result<(), Box<Error>> {
 }
 fn parse_input<'a, T: Read>(
     mut input: BufReader<T>,
-) -> Result<(HashMap<String, String>, Vec<Value>), Box<Error>> {
+) -> Result<(HashMap<String, String>, Vec<Interval>), Box<Error>> {
     let sections: Vec<String> = {
         let mut input_buf = String::new();
 
@@ -139,5 +146,29 @@ fn parse_input<'a, T: Read>(
         config.insert(String::from(entry[0]), String::from(entry[1]));
     }
 
-    Ok((config, serde_json::from_str(&sections[1])?))
+    let values: Vec<Value> = serde_json::from_str(&sections[1])?;
+
+    let mut intervals = Vec::new();
+
+    for value in values {
+        let format = "%Y%m%dT%H%M%SZ";
+
+        let start_str = value["start"].as_str().unwrap();
+        let end_str = value["end"].as_str().unwrap();
+
+        let tags_raw = value["tags"].as_array().unwrap();
+
+        let mut tags: Vec<String> = Vec::new();
+
+        for tag in tags_raw {
+            tags.push(String::from(tag.as_str().unwrap()));
+        }
+
+        let start = Utc.datetime_from_str(start_str, format)?;
+        let end = Utc.datetime_from_str(end_str, format)?;
+
+        intervals.push(Interval{ start: start, end: end, tags: tags });
+    }
+
+    Ok((config, intervals))
 }
