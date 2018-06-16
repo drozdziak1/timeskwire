@@ -2,6 +2,8 @@ extern crate chrono;
 extern crate docopt;
 extern crate env_logger;
 extern crate libc;
+extern crate pdf_canvas;
+extern crate palette;
 extern crate serde_json;
 
 #[macro_use]
@@ -10,27 +12,34 @@ extern crate log;
 extern crate serde_derive;
 
 mod interval;
+mod reports;
+mod util;
 
-use std::collections::{HashMap, HashSet};
+use chrono::{Local, TimeZone, Utc};
+use docopt::Docopt;
+use serde_json::Value;
+
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::io::{BufReader, Read, Write};
 use std::os::unix;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
-use chrono::{Duration, TimeZone, Utc};
-use docopt::Docopt;
 use interval::Interval;
-use serde_json::Value;
+use reports::{DefaultReport, Report};
 
 const USAGE: &'static str = "
 TimeSkwire - a PDF render extension for TimeWarrior.
 
+Without arguments, TimeSkwire will be waiting for input from TimeWarrior's extension API. You can
+read more about it at https://taskwarrior.org/docs/timewarrior/api.html
+
 Usage:
-  timeskwire [default] [output_filename]
+  timeskwire
   timeskwire init [<extension_dir> (-f | --force)]
   timeskwire (-h | --help)
   timeskwire --version
@@ -52,13 +61,8 @@ fn main() {
         .and_then(|dopt| dopt.parse())
         .unwrap_or_else(|e| e.exit());
 
-    match VERSION {
-        Some(v) => info!("TimeSkwire {}", v),
-        None => warn!("Could not retrieve TimeSkwire version"),
-    };
-
     if args.get_bool("--version") {
-        eprintln!("{}", VERSION.unwrap_or("unknown"));
+        println!("{}", VERSION.unwrap_or("unknown"));
         process::exit(libc::EXIT_SUCCESS);
     }
 
@@ -71,10 +75,9 @@ fn main() {
 
             default
         };
+        trace!("Using extension dir: {:?}", dir);
 
-        dir.push("timeskwire");
-
-        init(dir.as_path(), args.get_bool("--force")).unwrap_or_else(|e| {
+        init(&mut dir, args.get_bool("--force")).unwrap_or_else(|e| {
             writeln!(
                 io::stderr(),
                 "timeskwire: init: Could not symlink to {:?}: {}",
@@ -88,65 +91,66 @@ fn main() {
         process::exit(libc::EXIT_SUCCESS);
     }
 
-    let (config, times) = parse_input(BufReader::new(io::stdin())).unwrap();
+    let (config, intervals) = parse_input(BufReader::new(io::stdin())).unwrap();
 
     println!(
-        "TimeWarrior version: {}",
+        "TimeWarrior version {}",
         config
             .get("temp.version")
             .unwrap_or(&String::from("unknown"))
     );
+    println!("TimeSkwire version {}", VERSION.unwrap_or("unknown"));
 
-    let mut overall = Duration::zero();
+    let report_kind: String =
+        env::var("TIMESKWIRE_REPORT").unwrap_or(match config.get("timeskwire.report.kind") {
+            Some(s) => s.to_owned(),
+            None => {
+                eprintln!("Warning: No report choice made, using \"default\"");
+                String::from("default")
+            }
+        });
 
-    let mut starts = Vec::new();
-    let mut ends = Vec::new();
+    let report: Box<Report> = match report_kind.as_str() {
+        "default" => Box::new(DefaultReport {}),
+        _ => Box::new(DefaultReport {}),
+    };
 
-    for item in times {
-        println!("Item: {:?}", item);
+    let doc = report.render(&config, &intervals, "report.pdf").unwrap();
 
-        starts.push(item.start);
-        ends.push(item.end);
-
-        let mut dur = item.duration();
-
-        overall = overall + dur;
-
-        println!("Took: {}", format_hms(&dur));
-    }
-
-    println!("Overall: {}", format_hms(&overall));
+    doc.finish().unwrap();
 }
 
-fn init(extension_dir: &Path, force: bool) -> Result<(), Box<Error>> {
-    if !extension_dir.is_dir() {
+fn init(extension_path: &mut PathBuf, force: bool) -> Result<(), Box<Error>> {
+    if !extension_path.is_dir() {
         writeln!(
             io::stderr(),
             "timeskwire: {}: No such file or directory",
-            extension_dir.to_str().unwrap()
+            extension_path.to_str().unwrap()
         ).unwrap();
         process::exit(libc::EXIT_FAILURE);
     };
 
-    let src = env::current_exe()?;
-    let dst = fs::canonicalize(extension_dir)?;
+    extension_path.push("timeskwire");
 
-    if dst.exists() && force {
+    let src = env::current_exe()?;
+
+    if extension_path.exists() && force {
         debug!("`force` is true, removing target file");
-        fs::remove_file(dst.as_path())?;
+        fs::remove_file(extension_path.as_path())?;
     }
 
-    info!("Bootstrapping {:?} at {:?}", src, dst);
-    unix::fs::symlink(src.as_path(), dst.as_path())?;
+    info!("Bootstrapping {:?} at {:?}", src, extension_path);
+    unix::fs::symlink(src.as_path(), extension_path.as_path())?;
     Ok(())
 }
+
 fn parse_input<'a, T: Read>(
     mut input: BufReader<T>,
 ) -> Result<(HashMap<String, String>, Vec<Interval>), Box<Error>> {
     let sections: Vec<String> = {
         let mut input_buf = String::new();
 
-        input.read_to_string(&mut input_buf).unwrap();
+        input.read_to_string(&mut input_buf)?;
         input_buf
             .split("\n\n")
             .map(|section| String::from(section))
@@ -157,7 +161,7 @@ fn parse_input<'a, T: Read>(
     // Parse config value section
     for line in sections[0].lines() {
         let entry: Vec<&str> = line.splitn(2, ": ").collect();
-        debug!("Got key '{}' with value '{}'.", entry[0], entry[1]);
+        trace!("Got key '{}' with value '{}'.", entry[0], entry[1]);
 
         config.insert(String::from(entry[0]), String::from(entry[1]));
     }
@@ -167,39 +171,36 @@ fn parse_input<'a, T: Read>(
     let mut intervals = Vec::new();
 
     for value in values {
-        let format = "%Y%m%dT%H%M%SZ";
-
-        let start_str = value["start"].as_str().unwrap();
-        let end_str = value["end"].as_str().unwrap();
+        let mut tags: BTreeSet<String> = BTreeSet::new();
 
         let tags_raw = value["tags"].as_array().unwrap();
-
-        let mut tags: HashSet<String> = HashSet::new();
-
         for tag in tags_raw {
             tags.insert(String::from(tag.as_str().unwrap()));
         }
 
-        let start = Utc.datetime_from_str(start_str, format)?;
-        let end = Utc.datetime_from_str(end_str, format)?;
+        let format = "%Y%m%dT%H%M%SZ";
+        let start_str = value["start"].as_str().unwrap();
+        trace!("Parsing start date {:?}", start_str);
+        let start_utc = Utc.datetime_from_str(start_str, format)?.naive_utc();
+
+        // There's no "end" key if there's unfinished logging in progress; use now in that case
+        let end_utc = match value.get("end") {
+            Some(val) => {
+                Utc.datetime_from_str(val.as_str().unwrap(), format)?.naive_utc()
+            },
+            None => {
+              let end = Utc::now().naive_utc();
+              println!("Time logging still in progress, using now ({:?}) as end", end);
+              end
+            },
+        };
 
         intervals.push(Interval {
-            start: start,
-            end: end,
+            start: Local.from_utc_datetime(&start_utc),
+            end: Local.from_utc_datetime(&end_utc),
             tags: tags,
         });
     }
 
     Ok((config, intervals))
-}
-
-fn format_hms(d: &Duration) -> String {
-    let mut local = d.clone();
-
-    let h = local.num_hours();
-    local = local - Duration::hours(h);
-    let m = local.num_minutes();
-    local = local - Duration::minutes(m);
-    let s = local.num_seconds();
-    format!("{:02}:{:02}:{:02}", h, m, s)
 }
