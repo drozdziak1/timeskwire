@@ -2,8 +2,8 @@ extern crate chrono;
 extern crate docopt;
 extern crate env_logger;
 extern crate libc;
-extern crate pdf_canvas;
 extern crate palette;
+extern crate pdf_canvas;
 extern crate serde_json;
 
 #[macro_use]
@@ -53,6 +53,7 @@ Options:
 
 const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 const DEFAULT_EXTENSION_SUBDIR: &'static str = ".timewarrior/extensions/";
+const DEFAULT_REPORT_FILENAME: &'static str = "report.pdf";
 
 fn main() {
     env_logger::init();
@@ -115,7 +116,22 @@ fn main() {
         _ => Box::new(DefaultReport {}),
     };
 
-    let doc = report.render(&config, &intervals, "report.pdf").unwrap();
+    let doc = report
+        .render(
+            &config,
+            &intervals,
+            match config.get("timeskwire.report.filename") {
+                Some(name) => &name,
+                None => {
+                    info!(
+                        "No report filename defined, falling back to {}",
+                        DEFAULT_REPORT_FILENAME
+                    );
+                    DEFAULT_REPORT_FILENAME
+                }
+            },
+        )
+        .unwrap();
 
     doc.finish().unwrap();
 }
@@ -185,14 +201,17 @@ fn parse_input<'a, T: Read>(
 
         // There's no "end" key if there's unfinished logging in progress; use now in that case
         let end_utc = match value.get("end") {
-            Some(val) => {
-                Utc.datetime_from_str(val.as_str().unwrap(), format)?.naive_utc()
-            },
+            Some(val) => Utc
+                .datetime_from_str(val.as_str().unwrap(), format)?
+                .naive_utc(),
             None => {
-              let end = Utc::now().naive_utc();
-              println!("Time logging still in progress, using now ({:?}) as end", end);
-              end
-            },
+                let end = Utc::now().naive_utc();
+                println!(
+                    "Time logging still in progress, using now ({:?}) as end",
+                    end
+                );
+                end
+            }
         };
 
         intervals.push(Interval {
